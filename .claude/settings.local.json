@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m app.main:*)",
+      "Bash(dir /b \"C:\\Users\\ID\\ryadom_bot\")",
+      "Bash(dir /b \"C:\\Users\\ID\\ryadom_bot\\app\")",
+      "Bash(powershell -Command \"Remove-Item -Path ''C:\\Users\\ID\\ryadom_bot\\handlers'', ''C:\\Users\\ID\\ryadom_bot\\database'', ''C:\\Users\\ID\\ryadom_bot\\services'', ''C:\\Users\\ID\\ryadom_bot\\alembic'' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -Path ''C:\\Users\\ID\\ryadom_bot\\config.py'', ''C:\\Users\\ID\\ryadom_bot\\main.py'', ''C:\\Users\\ID\\ryadom_bot\\alembic.ini'', ''C:\\Users\\ID\\ryadom_bot\\ryadom.db'', ''C:\\Users\\ID\\ryadom_bot\\nul'' -Force -ErrorAction SilentlyContinue; Write-Host ''Old files removed''\")",
+      "Bash(powershell -Command:*)"
+    ]
+  }
+}

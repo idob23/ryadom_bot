@@ -55,6 +55,7 @@ class ProactiveService:
         - Had meaningful conversations before (not just /start)
         - Not blocked
         - Have name (completed onboarding)
+        - Have proactive check-ins enabled (or not set = default True)
         """
         cutoff = datetime.utcnow() - timedelta(days=min_days_inactive)
 
@@ -73,7 +74,13 @@ class ProactiveService:
             .order_by(User.last_active_at.asc())
             .limit(max_users)
         )
-        return list(result.scalars().all())
+        users = list(result.scalars().all())
+
+        # Filter by preferences (check if proactive_checkins is not disabled)
+        return [
+            u for u in users
+            if (u.preferences or {}).get("proactive_checkins", True)
+        ]
 
     async def generate_checkin_message(self, user: User) -> Optional[str]:
         """

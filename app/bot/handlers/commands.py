@@ -52,17 +52,12 @@ async def cmd_start(message: Message, session: AsyncSession):
 @router.message(Command("help"))
 async def cmd_help(message: Message, session: AsyncSession):
     """Handle /help command."""
-    help_text = """Я — Рядом. Просто тот, кто слушает.
+    help_text = """Я Рядом. Можешь просто писать — послушаю.
 
-Команды:
-/start — начать сначала
-/status — статус аккаунта
-/mood — отметить настроение
-/subscribe — управление подпиской
-/crisis — экстренная помощь
-/help — эта справка
-
-Можешь просто писать мне — я всегда готов выслушать."""
+/mood — записать настроение
+/settings — настройки
+/crisis — если совсем плохо
+/feedback — сказать что думаешь о боте"""
 
     await message.answer(help_text)
 
@@ -178,6 +173,55 @@ async def cmd_crisis(message: Message, session: AsyncSession):
         "Crisis command used",
         telegram_id=message.from_user.id,
     )
+
+
+@router.message(Command("settings"))
+async def cmd_settings(message: Message, session: AsyncSession):
+    """Handle /settings command - user preferences."""
+    telegram_id = message.from_user.id
+
+    user_repo = UserRepository(session)
+    user = await user_repo.get_by_telegram_id(telegram_id)
+
+    if not user:
+        await message.answer("Для начала напиши /start")
+        return
+
+    # Parse settings commands: /settings name Аня
+    parts = message.text.split(maxsplit=2)
+
+    if len(parts) >= 3:
+        setting = parts[1].lower()
+        value = parts[2]
+
+        if setting == "name" or setting == "имя":
+            await user_repo.update_name(user.id, value)
+            await message.answer(f"Ок, {value}.")
+            return
+        elif setting == "proactive" or setting == "напоминания":
+            if value.lower() in ("on", "да", "включить", "1"):
+                await user_repo.update_preferences(user.id, {"proactive_checkins": True})
+                await message.answer("Ок, буду иногда писать.")
+            elif value.lower() in ("off", "нет", "выключить", "0"):
+                await user_repo.update_preferences(user.id, {"proactive_checkins": False})
+                await message.answer("Ок, не буду беспокоить.")
+            else:
+                await message.answer("Укажи: /settings proactive on или /settings proactive off")
+            return
+
+    # Show current settings
+    preferences = user.preferences or {}
+    proactive = preferences.get("proactive_checkins", True)
+    proactive_status = "да" if proactive else "нет"
+
+    settings_text = f"""Имя: {user.name or '—'}
+Напоминания: {proactive_status}
+
+Изменить:
+/settings name Имя
+/settings proactive on/off"""
+
+    await message.answer(settings_text)
 
 
 @router.message(Command("reset"))

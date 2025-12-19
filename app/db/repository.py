@@ -6,11 +6,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
     ConversationSummary,
+    LifeEvent,
     Memory,
     Message,
     MoodEntry,
     Payment,
     PaymentStatus,
+    Person,
     Subscription,
     SubscriptionPlan,
     SubscriptionStatus,
@@ -70,9 +72,18 @@ class UserRepository:
         )
 
     async def update_preferences(self, user_id: int, preferences: dict) -> None:
-        """Update user's preferences."""
+        """Update user's preferences (merges with existing)."""
+        # Get current preferences
+        result = await self.session.execute(
+            select(User.preferences).where(User.id == user_id)
+        )
+        current = result.scalar_one_or_none() or {}
+
+        # Merge new preferences
+        merged = {**current, **preferences}
+
         await self.session.execute(
-            update(User).where(User.id == user_id).values(preferences=preferences)
+            update(User).where(User.id == user_id).values(preferences=merged)
         )
 
     async def complete_onboarding(self, user_id: int) -> None:
@@ -162,7 +173,7 @@ class MessageRepository:
 
 
 class MemoryRepository:
-    """Repository for Memory operations."""
+    """Repository for Memory operations - the eternal friend's memory."""
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -174,6 +185,8 @@ class MemoryRepository:
         category: str = "general",
         importance: int = 5,
         emotional_weight: str = "neutral",
+        tags: Optional[list] = None,
+        memory_key: Optional[str] = None,
         source_message_id: Optional[int] = None,
     ) -> Memory:
         """Add a memory fact."""
@@ -183,26 +196,76 @@ class MemoryRepository:
             category=category,
             importance=importance,
             emotional_weight=emotional_weight,
+            tags=tags,
+            memory_key=memory_key,
             source_message_id=source_message_id,
+            is_current=True,
         )
         self.session.add(memory)
         await self.session.flush()
         return memory
 
-    async def get_all(self, user_id: int) -> list[Memory]:
-        """Get all memories for a user."""
+    async def get_by_key(self, user_id: int, memory_key: str) -> Optional[Memory]:
+        """Get memory by unique key for updates."""
         result = await self.session.execute(
             select(Memory)
-            .where(Memory.user_id == user_id)
-            .order_by(Memory.importance.desc(), Memory.created_at.desc())
+            .where(
+                and_(
+                    Memory.user_id == user_id,
+                    Memory.memory_key == memory_key,
+                    Memory.is_current == True,
+                )
+            )
         )
+        return result.scalar_one_or_none()
+
+    async def update_memory(
+        self,
+        memory_id: int,
+        new_fact: str,
+        old_fact: str,
+    ) -> Memory:
+        """Update a memory, keeping history."""
+        result = await self.session.execute(
+            select(Memory).where(Memory.id == memory_id)
+        )
+        memory = result.scalar_one()
+
+        # Add to history
+        history = memory.history or []
+        history.append({
+            "old_value": old_fact,
+            "changed_at": datetime.utcnow().isoformat(),
+        })
+
+        memory.fact = new_fact
+        memory.history = history
+        memory.updated_at = datetime.utcnow()
+
+        await self.session.flush()
+        return memory
+
+    async def get_all(self, user_id: int, current_only: bool = True) -> list[Memory]:
+        """Get all memories for a user."""
+        query = select(Memory).where(Memory.user_id == user_id)
+        if current_only:
+            query = query.where(Memory.is_current == True)
+        query = query.order_by(Memory.importance.desc(), Memory.created_at.desc())
+
+        result = await self.session.execute(query)
         return list(result.scalars().all())
 
     async def get_by_category(self, user_id: int, category: str) -> list[Memory]:
         """Get memories by category."""
         result = await self.session.execute(
             select(Memory)
-            .where(and_(Memory.user_id == user_id, Memory.category == category))
+            .where(
+                and_(
+                    Memory.user_id == user_id,
+                    Memory.category == category,
+                    Memory.is_current == True,
+                )
+            )
             .order_by(Memory.importance.desc())
         )
         return list(result.scalars().all())
@@ -212,11 +275,49 @@ class MemoryRepository:
         result = await self.session.execute(
             select(Memory)
             .where(
-                and_(Memory.user_id == user_id, Memory.importance >= min_importance)
+                and_(
+                    Memory.user_id == user_id,
+                    Memory.importance >= min_importance,
+                    Memory.is_current == True,
+                )
             )
             .order_by(Memory.importance.desc())
         )
         return list(result.scalars().all())
+
+    async def search_by_tags(self, user_id: int, search_tags: list[str]) -> list[Memory]:
+        """Search memories by tags (any match)."""
+        # For SQLite/PostgreSQL JSON array search
+        all_memories = await self.get_all(user_id)
+        matching = []
+        search_tags_lower = [t.lower() for t in search_tags]
+
+        for memory in all_memories:
+            if memory.tags:
+                memory_tags_lower = [t.lower() for t in memory.tags]
+                if any(tag in memory_tags_lower for tag in search_tags_lower):
+                    matching.append(memory)
+
+        return matching
+
+    async def search_by_text(self, user_id: int, search_text: str) -> list[Memory]:
+        """Search memories by text content."""
+        all_memories = await self.get_all(user_id)
+        search_lower = search_text.lower()
+
+        matching = [
+            m for m in all_memories
+            if search_lower in m.fact.lower()
+        ]
+        return matching
+
+    async def mark_accessed(self, memory_ids: list[int]) -> None:
+        """Mark memories as accessed (for relevance tracking)."""
+        await self.session.execute(
+            update(Memory)
+            .where(Memory.id.in_(memory_ids))
+            .values(last_accessed_at=func.now())
+        )
 
     async def update_importance(self, memory_id: int, importance: int) -> None:
         """Update memory importance."""
@@ -225,6 +326,210 @@ class MemoryRepository:
             .where(Memory.id == memory_id)
             .values(importance=importance, last_accessed_at=func.now())
         )
+
+
+class PersonRepository:
+    """Repository for Person operations - people in user's life."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def add(
+        self,
+        user_id: int,
+        name: str,
+        relation: str,
+        notes: Optional[str] = None,
+        emotional_tone: str = "neutral",
+        important_dates: Optional[dict] = None,
+    ) -> Person:
+        """Add a person to user's circle."""
+        person = Person(
+            user_id=user_id,
+            name=name,
+            relation=relation,
+            notes=notes,
+            emotional_tone=emotional_tone,
+            important_dates=important_dates,
+            is_active=True,
+        )
+        self.session.add(person)
+        await self.session.flush()
+        return person
+
+    async def get_all(self, user_id: int, active_only: bool = True) -> list[Person]:
+        """Get all persons for a user."""
+        query = select(Person).where(Person.user_id == user_id)
+        if active_only:
+            query = query.where(Person.is_active == True)
+        query = query.order_by(Person.created_at.desc())
+
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
+
+    async def get_by_name(self, user_id: int, name: str) -> Optional[Person]:
+        """Get person by name (case-insensitive partial match)."""
+        all_persons = await self.get_all(user_id)
+        name_lower = name.lower()
+
+        for person in all_persons:
+            if name_lower in person.name.lower():
+                return person
+        return None
+
+    async def get_by_relation(self, user_id: int, relation: str) -> list[Person]:
+        """Get persons by relation type."""
+        result = await self.session.execute(
+            select(Person)
+            .where(
+                and_(
+                    Person.user_id == user_id,
+                    Person.relation == relation,
+                    Person.is_active == True,
+                )
+            )
+        )
+        return list(result.scalars().all())
+
+    async def update(
+        self,
+        person_id: int,
+        notes: Optional[str] = None,
+        emotional_tone: Optional[str] = None,
+        important_dates: Optional[dict] = None,
+    ) -> None:
+        """Update person information."""
+        values = {"updated_at": func.now()}
+        if notes is not None:
+            values["notes"] = notes
+        if emotional_tone is not None:
+            values["emotional_tone"] = emotional_tone
+        if important_dates is not None:
+            values["important_dates"] = important_dates
+
+        await self.session.execute(
+            update(Person)
+            .where(Person.id == person_id)
+            .values(**values)
+        )
+
+    async def get_upcoming_dates(self, user_id: int, days: int = 14) -> list[dict]:
+        """Get upcoming important dates (birthdays, anniversaries)."""
+        persons = await self.get_all(user_id)
+        today = datetime.utcnow().date()
+        upcoming = []
+
+        for person in persons:
+            if not person.important_dates:
+                continue
+
+            for date_type, date_str in person.important_dates.items():
+                try:
+                    date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    # Check if this year's occurrence is upcoming
+                    this_year = date.replace(year=today.year)
+                    if this_year < today:
+                        this_year = date.replace(year=today.year + 1)
+
+                    days_until = (this_year - today).days
+                    if 0 <= days_until <= days:
+                        upcoming.append({
+                            "person_name": person.name,
+                            "date_type": date_type,
+                            "date": this_year.isoformat(),
+                            "days_until": days_until,
+                        })
+                except (ValueError, TypeError):
+                    continue
+
+        return sorted(upcoming, key=lambda x: x["days_until"])
+
+
+class LifeEventRepository:
+    """Repository for LifeEvent operations - significant events."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def add(
+        self,
+        user_id: int,
+        title: str,
+        description: Optional[str] = None,
+        event_date: Optional[datetime] = None,
+        is_recurring: bool = False,
+        recurrence_type: Optional[str] = None,
+        emotional_weight: str = "neutral",
+        related_person_id: Optional[int] = None,
+        tags: Optional[list] = None,
+    ) -> LifeEvent:
+        """Add a life event."""
+        event = LifeEvent(
+            user_id=user_id,
+            title=title,
+            description=description,
+            event_date=event_date,
+            is_recurring=is_recurring,
+            recurrence_type=recurrence_type,
+            emotional_weight=emotional_weight,
+            related_person_id=related_person_id,
+            tags=tags,
+        )
+        self.session.add(event)
+        await self.session.flush()
+        return event
+
+    async def get_all(self, user_id: int) -> list[LifeEvent]:
+        """Get all events for a user."""
+        result = await self.session.execute(
+            select(LifeEvent)
+            .where(LifeEvent.user_id == user_id)
+            .order_by(LifeEvent.event_date.desc().nullslast())
+        )
+        return list(result.scalars().all())
+
+    async def get_recent(self, user_id: int, days: int = 30) -> list[LifeEvent]:
+        """Get recent events."""
+        since = datetime.utcnow() - timedelta(days=days)
+        result = await self.session.execute(
+            select(LifeEvent)
+            .where(
+                and_(
+                    LifeEvent.user_id == user_id,
+                    LifeEvent.created_at >= since,
+                )
+            )
+            .order_by(LifeEvent.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def search_by_tags(self, user_id: int, search_tags: list[str]) -> list[LifeEvent]:
+        """Search events by tags."""
+        all_events = await self.get_all(user_id)
+        search_tags_lower = [t.lower() for t in search_tags]
+
+        matching = []
+        for event in all_events:
+            if event.tags:
+                event_tags_lower = [t.lower() for t in event.tags]
+                if any(tag in event_tags_lower for tag in search_tags_lower):
+                    matching.append(event)
+
+        return matching
+
+    async def get_by_person(self, user_id: int, person_id: int) -> list[LifeEvent]:
+        """Get events related to a specific person."""
+        result = await self.session.execute(
+            select(LifeEvent)
+            .where(
+                and_(
+                    LifeEvent.user_id == user_id,
+                    LifeEvent.related_person_id == person_id,
+                )
+            )
+            .order_by(LifeEvent.event_date.desc().nullslast())
+        )
+        return list(result.scalars().all())
 
 
 class SubscriptionRepository:

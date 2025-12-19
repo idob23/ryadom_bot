@@ -11,10 +11,12 @@ from aiogram.enums import ParseMode
 import structlog
 
 from app.config import settings
-from app.bot.handlers import chat_router, commands_router, subscription_router
+from app.bot.handlers import admin_router, chat_router, commands_router, subscription_router
 from app.bot.middlewares import DatabaseMiddleware, LoggingMiddleware, RateLimitMiddleware
 from app.core.claude import close_claude_client
 from app.db.session import close_db, init_db
+from app.services.health import start_health_server, stop_health_server
+from app.services.scheduler import init_scheduler, stop_scheduler
 from app.utils.logging import setup_logging, setup_sentry
 
 
@@ -29,6 +31,14 @@ async def on_startup(bot: Bot) -> None:
     await init_db()
     logger.info("Database initialized")
 
+    # Initialize scheduler for proactive check-ins
+    init_scheduler(bot)
+    logger.info("Scheduler initialized")
+
+    # Start health check server
+    await start_health_server(port=settings.health_port)
+    logger.info("Health check server started", port=settings.health_port)
+
     # Get bot info
     bot_info = await bot.get_me()
     logger.info(
@@ -41,6 +51,12 @@ async def on_startup(bot: Bot) -> None:
 async def on_shutdown(bot: Bot) -> None:
     """Shutdown tasks."""
     logger.info("Shutting down bot...")
+
+    # Stop scheduler
+    stop_scheduler()
+
+    # Stop health check server
+    await stop_health_server()
 
     # Close connections
     await close_claude_client()
@@ -62,6 +78,7 @@ def create_dispatcher() -> Dispatcher:
     dp.callback_query.middleware(DatabaseMiddleware())
 
     # Register routers (order matters - commands before general chat!)
+    dp.include_router(admin_router)
     dp.include_router(commands_router)
     dp.include_router(subscription_router)
     dp.include_router(chat_router)

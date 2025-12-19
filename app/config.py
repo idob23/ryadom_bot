@@ -48,9 +48,22 @@ class Settings(BaseSettings):
     # Sentry (optional)
     sentry_dsn: Optional[str] = Field(default=None, alias="SENTRY_DSN")
 
+    # Admin telegram IDs (comma-separated)
+    admin_ids: str = Field(default="", alias="ADMIN_IDS")
+
     # Environment
     debug: bool = Field(default=False, alias="DEBUG")
     environment: str = Field(default="development", alias="ENVIRONMENT")
+
+    # Health check
+    health_port: int = Field(default=8080, alias="HEALTH_PORT")
+
+    @property
+    def admin_telegram_ids(self) -> list[int]:
+        """Parse admin IDs from comma-separated string."""
+        if not self.admin_ids:
+            return []
+        return [int(id.strip()) for id in self.admin_ids.split(",") if id.strip()]
 
     @field_validator("database_url")
     @classmethod

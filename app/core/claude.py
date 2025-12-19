@@ -194,6 +194,9 @@ class ClaudeClient:
         conversation_summaries: list[str],
         time_of_day: str = "day",
         days_since_last_chat: int = 0,
+        persons: list[dict] = None,
+        recent_events: list[dict] = None,
+        upcoming_dates: list[dict] = None,
     ) -> ClaudeResponse:
         """
         Get chat response from Claude.
@@ -206,9 +209,17 @@ class ClaudeClient:
             conversation_summaries: Previous conversation summaries
             time_of_day: morning/afternoon/evening/night
             days_since_last_chat: Days since last conversation
+            persons: People in user's life
+            recent_events: Recent events in user's life
+            upcoming_dates: Upcoming important dates
         """
         # Build context
-        user_context = build_user_context(user_data, memories, mood_history)
+        user_context = build_user_context(
+            user_data, memories, mood_history,
+            persons=persons,
+            recent_events=recent_events,
+            upcoming_dates=upcoming_dates,
+        )
         additional_context = build_additional_context(
             time_of_day, days_since_last_chat, conversation_summaries
         )
@@ -326,6 +337,70 @@ class ClaudeClient:
 
         except ClaudeAPIError as e:
             logger.error("Failed to summarize conversation", error=str(e))
+            return None
+
+    async def extract_full_memory(
+        self,
+        message: str,
+        conversation: str,
+        known_facts: list[str],
+        known_persons: list[str],
+    ) -> Optional[dict]:
+        """
+        Extract ALL types of memories from a message.
+        Uses Haiku for cost efficiency.
+
+        Returns:
+        {
+            "facts": [...],
+            "persons": [...],
+            "events": [...],
+            "updates": [...]
+        }
+        """
+        prompt = MEMORY_EXTRACTION_PROMPT.format(
+            message=message,
+            conversation=conversation,
+            known_facts="\n".join(f"- {f}" for f in known_facts[:50]) if known_facts else "Пока нет",
+            known_persons="\n".join(f"- {p}" for p in known_persons[:20]) if known_persons else "Пока нет",
+        )
+
+        try:
+            response = await self._make_request(
+                messages=[{"role": "user", "content": prompt}],
+                system="Ты — система памяти. Извлекай ВСЮ информацию о человеке. Отвечай ТОЛЬКО валидным JSON без markdown.",
+                max_tokens=1500,
+                use_fast_model=True,  # Use Haiku
+            )
+
+            # Clean up response - remove markdown code blocks if present
+            content = response.content.strip()
+            if content.startswith("```"):
+                # Remove ```json and ``` markers
+                lines = content.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines)
+
+            data = json.loads(content)
+
+            # Validate structure
+            result = {
+                "facts": data.get("facts", []),
+                "persons": data.get("persons", []),
+                "events": data.get("events", []),
+                "updates": data.get("updates", []),
+            }
+
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse memory extraction JSON", error=str(e))
+            return None
+        except ClaudeAPIError as e:
+            logger.error("Failed to extract full memory", error=str(e))
             return None
 
 

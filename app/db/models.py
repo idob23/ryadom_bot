@@ -80,6 +80,8 @@ class User(Base):
     # Relationships
     messages: Mapped[list["Message"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     memories: Mapped[list["Memory"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    persons: Mapped[list["Person"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    life_events: Mapped[list["LifeEvent"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     subscription: Mapped[Optional["Subscription"]] = relationship(back_populates="user", uselist=False)
     payments: Mapped[list["Payment"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     usage_logs: Mapped[list["UsageLog"]] = relationship(back_populates="user", cascade="all, delete-orphan")
@@ -150,7 +152,7 @@ class Message(Base):
 
 
 class Memory(Base):
-    """Long-term memory about user."""
+    """Long-term memory about user - facts, preferences, patterns."""
     __tablename__ = "memories"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -159,21 +161,34 @@ class Memory(Base):
     # Memory content
     fact: Mapped[str] = mapped_column(Text, nullable=False)
     category: Mapped[str] = mapped_column(String(50), default="general")
-    # Categories: identity, relationships, struggles, strengths, triggers, coping, values, history
+    # Categories: identity, relationships, work, health, interests, struggles,
+    # strengths, triggers, coping, values, preferences, goals
     importance: Mapped[int] = mapped_column(Integer, default=5)  # 1-10 scale
 
     # Emotional weight - how to handle this topic
     emotional_weight: Mapped[str] = mapped_column(String(20), default="neutral")
     # neutral, positive, painful - painful topics need careful handling
 
+    # Tags for search (stored as JSON array)
+    tags: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # e.g., ["работа", "стресс", "начальник"]
+
+    # For updating memories instead of duplicating
+    memory_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    # e.g., "relationship_with_father", "job_status" - unique per user
+
+    # History of changes (JSON array of {old_value, changed_at})
+    history: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
     # Source tracking
     source_message_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
-    # For semantic search (future)
-    embedding: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # Is this memory still current/valid?
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
     last_accessed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     # Relationship
@@ -182,6 +197,99 @@ class Memory(Base):
     __table_args__ = (
         Index("ix_memories_user_category", "user_id", "category"),
         Index("ix_memories_user_importance", "user_id", "importance"),
+        Index("ix_memories_user_key", "user_id", "memory_key"),
+        Index("ix_memories_user_current", "user_id", "is_current"),
+    )
+
+
+class Person(Base):
+    """People in user's life - family, friends, colleagues, etc."""
+    __tablename__ = "persons"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+
+    # Person info
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # e.g., "мама", "Паша", "начальник Игорь"
+
+    relation: Mapped[str] = mapped_column(String(50), nullable=False)
+    # e.g., "мать", "друг", "коллега", "бывший партнёр", "терапевт"
+
+    # Additional notes about this person
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # e.g., "живёт в другом городе", "часто критикует"
+
+    # Emotional context of relationship
+    emotional_tone: Mapped[str] = mapped_column(String(20), default="neutral")
+    # positive, neutral, complicated, painful
+
+    # Important dates related to this person
+    important_dates: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # e.g., {"birthday": "1965-03-15", "anniversary": "2020-06-01"}
+
+    # Is this person still relevant/in user's life?
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    # Relationship
+    user: Mapped["User"] = relationship(back_populates="persons")
+
+    __table_args__ = (
+        Index("ix_persons_user_name", "user_id", "name"),
+        Index("ix_persons_user_relation", "user_id", "relation"),
+    )
+
+
+class LifeEvent(Base):
+    """Significant events in user's life - past and upcoming."""
+    __tablename__ = "life_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+
+    # Event info
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    # e.g., "уволили с работы", "поссорился с мамой", "день рождения"
+
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # More details about the event
+
+    # When it happened/will happen
+    event_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Can be null if exact date unknown
+
+    # Is this recurring? (birthdays, anniversaries)
+    is_recurring: Mapped[bool] = mapped_column(Boolean, default=False)
+    recurrence_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # "yearly", "monthly", etc.
+
+    # Emotional impact
+    emotional_weight: Mapped[str] = mapped_column(String(20), default="neutral")
+    # positive, neutral, painful, mixed
+
+    # Related person (if any)
+    related_person_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("persons.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # Tags for search
+    tags: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    user: Mapped["User"] = relationship(back_populates="life_events")
+    related_person: Mapped[Optional["Person"]] = relationship()
+
+    __table_args__ = (
+        Index("ix_life_events_user_date", "user_id", "event_date"),
+        Index("ix_life_events_user_recurring", "user_id", "is_recurring"),
     )
 
 
@@ -307,4 +415,28 @@ class ConversationSummary(Base):
 
     __table_args__ = (
         Index("ix_conversation_summaries_user", "user_id", "created_at"),
+    )
+
+
+class Feedback(Base):
+    """User feedback for beta testing."""
+    __tablename__ = "feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+
+    # Feedback content
+    rating: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 1-5 stars
+    text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    category: Mapped[str] = mapped_column(String(50), default="general")
+    # Categories: general, bug, feature, complaint, praise
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    # Relationship
+    user: Mapped["User"] = relationship()
+
+    __table_args__ = (
+        Index("ix_feedback_user", "user_id", "created_at"),
     )
